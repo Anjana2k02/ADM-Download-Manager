@@ -1,0 +1,137 @@
+name: Build and release ADM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only the final release job can write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: adm-release-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Set release version
+        id: version
+        run: |
+          # Unique on every push and every manual rerun; valid Windows file version.
+          if ([int]$env:GITHUB_RUN_NUMBER -gt 65534 -or [int]$env:GITHUB_RUN_ATTEMPT -gt 65534) {
+            throw 'Increase the version prefix and reset the numbering scheme before releasing.'
+          }
+          $version = "1.0.$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Build and run download-engine tests
+        run: |
+          dotnet build ADM.sln -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project tests/ADM.Tests -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test browser helper
+        run: |
+          node tests/browser-helper.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/test_bridge.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build download packages
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/Build.ps1 -Version $env:RELEASE_VERSION
+          ./scripts/Build.ps1 -Standalone -Version $env:RELEASE_VERSION
+      - name: Build Windows installer
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/Build-Installer.ps1 -Version $env:RELEASE_VERSION
+      - name: Verify installer, installed app, and uninstaller
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP 'ADM-install-check'
+          $setup = Start-Process -FilePath (Resolve-Path artifacts/ADM-Setup-win-x64.exe) -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`"") -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installation failed: $($setup.ExitCode)" }
+          $capture = Join-Path $env:RUNNER_TEMP 'adm-installed.png'
+          $app = Start-Process -FilePath (Join-Path $installDir 'ADM.exe') -ArgumentList "--screenshot `"$capture`"" -WindowStyle Hidden -PassThru
+          if (-not $app.WaitForExit(30000)) { throw 'Installed ADM did not exit after its launch check.' }
+          if ($app.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $capture)) { throw 'Installed ADM launch check failed.' }
+          $uninstall = Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -WindowStyle Hidden -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path -LiteralPath (Join-Path $installDir 'ADM.exe'))) { throw 'Uninstall check failed.' }
+      - name: Prepare release assets and checksums
+        run: |
+          $assets = @('ADM-Setup-win-x64.exe', 'ADM-standalone-win-x64.zip', 'ADM-portable-win-x64.zip')
+          New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
+          $checksums = foreach ($asset in $assets) {
+            $source = Join-Path artifacts $asset
+            if (-not (Test-Path -LiteralPath $source)) { throw "Missing release asset: $asset" }
+            Copy-Item -LiteralPath $source -Destination artifacts/release
+            $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $asset"
+          }
+          $checksums | Set-Content artifacts/release/SHA256SUMS.txt -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adm-release-${{ steps.version.outputs.version }}
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: adm-release-${{ needs.build.outputs.version }}
+          path: release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          # Do not promote an older commit if main advanced while it was building.
+          current_head="$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)"
+          if [ "$current_head" != "$COMMIT_SHA" ]; then
+            echo "main has advanced; the newer workflow run will publish the release."
+            exit 0
+          fi
+          cat > release-notes.md <<EOF
+          ADM ${RELEASE_VERSION} — automatically built from main after tests passed.
+
+          **Recommended:** download **ADM-Setup-win-x64.exe** to install ADM. The .NET runtime is included.
+
+          - **ADM-standalone-win-x64.zip:** extract and run ADM.exe, no installer required.
+          - **ADM-portable-win-x64.zip:** smaller package; requires .NET 10 Desktop Runtime.
+          - **SHA256SUMS.txt:** verify downloaded files.
+
+          Windows x64. The installer is unsigned; Windows may display a publisher warning.
+          Installing a newer version preserves your download library and queue. Exit ADM before upgrading.
+          The optional browser helper needs separate setup; see BROWSER-SETUP.md in the installed folder.
+
+          Commit: ${COMMIT_SHA}
+          Build: https://github.com/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          gh release create "v${RELEASE_VERSION}" release/* \
+            --repo "$GH_REPO" \
+            --target "$COMMIT_SHA" \
+            --title "ADM ${RELEASE_VERSION}" \
+            --notes-file release-notes.md \
+            --latest

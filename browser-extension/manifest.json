@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "ADM · Send to download manager",
+  "description": "Send direct download links to your local ADM app. No browsing history or page access.",
+  "version": "1.0.0",
+  "permissions": ["contextMenus", "nativeMessaging", "storage"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Send to ADM", "default_popup": "popup.html" },
+  "icons": { "128": "icon.png" }
+}
