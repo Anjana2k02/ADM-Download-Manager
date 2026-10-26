@@ -2,7 +2,7 @@ name: Build and release ADM
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 # Only the final release job can write to the repository.
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: windows-2025
     timeout-minutes: 30
     outputs:
@@ -106,15 +106,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           COMMIT_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
         run: |
-          # Do not promote an older commit if main advanced while it was building.
-          current_head="$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)"
+          # Do not promote an older commit if its branch advanced while building.
+          current_head="$(gh api "repos/${GH_REPO}/commits/${RELEASE_BRANCH}" --jq .sha)"
           if [ "$current_head" != "$COMMIT_SHA" ]; then
-            echo "main has advanced; the newer workflow run will publish the release."
+            echo "The release branch has advanced; the newer workflow run will publish the release."
             exit 0
           fi
           cat > release-notes.md <<EOF
-          ADM ${RELEASE_VERSION} — automatically built from main after tests passed.
+          ADM ${RELEASE_VERSION} — automatically built from ${RELEASE_BRANCH} after tests passed.
 
           **Recommended:** download **ADM-Setup-win-x64.exe** to install ADM. The .NET runtime is included.
 

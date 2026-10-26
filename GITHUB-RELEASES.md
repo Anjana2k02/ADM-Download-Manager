@@ -1,6 +1,16 @@
 # Publish ADM automatically on GitHub
 
-The included `.github/workflows/release.yml` runs on every push to `main`, and can also be started manually from the Actions tab with `main` selected.
+The included `.github/workflows/release.yml` runs on every push to `main` or `master`, and can also be started manually from the Actions tab with either branch selected.
+
+Your current repository, `Anjana2k02/ADM-Download-Manager`, uses **master**. To activate the corrected workflow, commit and push the changes on that branch:
+
+```powershell
+git add .github/workflows/release.yml GITHUB-RELEASES.md
+git commit -m "Fix automatic releases for master branch"
+git push origin master
+```
+
+Then open https://github.com/Anjana2k02/ADM-Download-Manager/actions and wait for the release workflow. The installer appears under Releases after every step succeeds. A manually created release with only source-code archives has not built the application.
 
 It tests the software, builds the two ZIP packages and a Windows installer, checks installation/launch/uninstall on the runner, computes SHA-256 checksums, and then creates a GitHub Release marked **Latest**. Failed tests or packaging stop publication. Every published run keeps its own release history. Only the release job has repository write permission; it uses GitHub's automatically provided token, so no personal access token secret is required.
 
